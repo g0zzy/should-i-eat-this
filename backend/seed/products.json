@@ -1,0 +1,70 @@
+[
+  {
+    "id": "granola-bar",
+    "name": "Nature Valley Oats & Honey Granola Bar",
+    "ingredients": [
+      "whole grain oats",
+      "sugar",
+      "canola oil",
+      "honey",
+      "brown sugar syrup",
+      "salt",
+      "baking soda",
+      "soy lecithin"
+    ],
+    "nutrition": {
+      "serving_size": "2 bars (42g)",
+      "calories": 190,
+      "total_sugar_g": 11,
+      "added_sugar_g": 11,
+      "fiber_g": 2,
+      "protein_g": 3,
+      "sodium_mg": 160,
+      "total_fat_g": 7
+    }
+  },
+  {
+    "id": "sports-drink",
+    "name": "Gatorade Thirst Quencher (Lemon-Lime)",
+    "ingredients": [
+      "water",
+      "sugar",
+      "dextrose",
+      "citric acid",
+      "salt",
+      "sodium citrate",
+      "monopotassium phosphate",
+      "natural flavor",
+      "yellow 5",
+      "blue 1"
+    ],
+    "nutrition": {
+      "serving_size": "12 fl oz (355ml)",
+      "calories": 80,
+      "total_sugar_g": 21,
+      "added_sugar_g": 21,
+      "fiber_g": 0,
+      "protein_g": 0,
+      "sodium_mg": 160,
+      "potassium_mg": 45
+    }
+  },
+  {
+    "id": "greek-yogurt",
+    "name": "Chobani Plain Greek Yogurt (Whole Milk)",
+    "ingredients": [
+      "cultured pasteurized whole milk",
+      "live active cultures"
+    ],
+    "nutrition": {
+      "serving_size": "1 cup (227g)",
+      "calories": 180,
+      "total_sugar_g": 7,
+      "added_sugar_g": 0,
+      "fiber_g": 0,
+      "protein_g": 19,
+      "sodium_mg": 95,
+      "total_fat_g": 9
+    }
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "diabetic",
+    "name": "Maria Chen",
+    "profile": "38-year-old with Type 2 diabetes, diagnosed 3 years ago. Manages blood sugar with metformin and diet. Actively avoids high-glycemic-index foods, added sugars, and refined carbs. Has previously reported energy crashes after eating foods with more than 20g of sugar per serving. Prefers snacks with at least 5g of protein or fiber to slow glucose absorption. Doctor has recommended keeping added sugar under 25g/day total."
+  },
+  {
+    "id": "athlete",
+    "name": "Jordan Reyes",
+    "profile": "29-year-old competitive endurance runner training for a marathon, ~60 miles/week. Needs quick-digesting carbs for pre-run fueling and glycogen replenishment, tolerates higher sugar and sodium around training windows. Prioritizes electrolytes (sodium, potassium) and easily digestible carbohydrates over fiber content near workouts. Avoids high-fat, high-fiber foods within 2 hours of a run due to past GI distress. Not concerned about added sugar in moderation given high training volume."
+  }
+]

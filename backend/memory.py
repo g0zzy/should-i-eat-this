@@ -1,69 +1,92 @@
-"""Persistent persona memory, backed by Cognee Cloud.
+"""Backwards-compatible façade for the Cognee person-memory service.
 
-Uses the lightweight `cognee-sdk` client (a thin httpx wrapper over the
-Cognee Cloud REST API) rather than the full `cognee` package — that avoids
-pulling in cognee's local vector/graph DB stack and its Rust-built
-`cbor2` dependency, which isn't needed when Cognee is doing the hosting.
-
-Each persona gets its own Cognee dataset (dataset_name == persona_id), so
-get_context() can scope its search to just that person's data.
+New code should import typed models and functions from
+``services.memory_service``.  The original ``seed_personas`` and
+``get_context`` entry points remain available while the mock evaluator is
+still in place.
 """
+from __future__ import annotations
+
 import json
-import os
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from cognee_sdk import CogneeClient
-from cognee_sdk.models import SearchType
-from dotenv import load_dotenv
-
-load_dotenv()
+from services.memory_service import (
+    CogneeMemoryService,
+    EvaluationContext,
+    FoodDecisionEvent,
+    PersonProfile,
+)
 
 SEED_DIR = Path(__file__).parent / "seed"
-
-COGNEE_API_URL = os.environ["COGNEE_API_URL"]
-COGNEE_API_KEY = os.environ["COGNEE_API_KEY"]
+_service = CogneeMemoryService()
 
 
-def load_persona_profiles() -> list[dict]:
-    """Read the raw seed file (used by seed_personas() and by mock mode)."""
-    with open(SEED_DIR / "personas.json") as f:
-        return json.load(f)
+def load_persona_profiles() -> list[dict[str, Any]]:
+    """Read the legacy persona seed file used by the current mock UI."""
+    with open(SEED_DIR / "personas.json") as file:
+        return json.load(file)
 
 
-def _client() -> CogneeClient:
-    return CogneeClient(api_url=COGNEE_API_URL, api_token=COGNEE_API_KEY)
+def _legacy_profile(persona: dict[str, Any]) -> PersonProfile:
+    """Map the existing prose-only demo personas to the structured model."""
+    if persona["id"] == "diabetic":
+        return PersonProfile(
+            persona_id="diabetic",
+            name=persona["name"],
+            health_conditions=["type_2_diabetes"],
+            medications_or_considerations=["metformin"],
+            dietary_goals=["limit_added_sugar", "increase_fiber"],
+            personal_rules=[
+                "Avoid snacks with more than 20g sugar per serving.",
+                "Prefer snacks with at least 5g protein or fiber.",
+                "Doctor-recommended added-sugar target is under 25g per day.",
+            ],
+        )
+    return PersonProfile(
+        persona_id="athlete",
+        name=persona["name"],
+        health_conditions=[],
+        dietary_goals=["fuel_endurance_training", "avoid_pre_run_gi_distress"],
+        personal_rules=[
+            "Avoid high-fat, high-fiber foods within two hours of a run.",
+            "Quick-digesting carbohydrates and electrolytes are appropriate around training.",
+        ],
+    )
 
 
 async def seed_personas() -> None:
-    """Load each persona's profile text into its own Cognee dataset and
-    run cognify so it becomes queryable knowledge. Run this once at startup
-    (or via a one-off setup script) before calling get_context().
+    """Seed/update the two structured demo profiles, without food history."""
+    for persona in load_persona_profiles():
+        await _service.upsert_profile(_legacy_profile(persona))
+
+
+async def seed_demo_memory() -> None:
+    """Seed profiles plus fictional food-decision history for the POC demo.
+
+    This is safe to run for profiles. Food events are append-only, so run it
+    once per empty demo tenant rather than repeatedly.
     """
-    personas = load_persona_profiles()
-    async with _client() as client:
-        for persona in personas:
-            await client.add(data=persona["profile"], dataset_name=persona["id"])
-        await client.cognify(datasets=[p["id"] for p in personas])
+    await seed_personas()
+    with open(SEED_DIR / "demo_memory_events.json") as file:
+        events = json.load(file)
+    for event in events:
+        await _service.record_food_decision(FoodDecisionEvent.model_validate(event))
+
+
+async def get_evaluation_context(
+    persona_id: str, product: dict[str, Any], now: datetime
+) -> EvaluationContext:
+    """Retrieve product-specific profile and food-decision memory."""
+    return await _service.get_evaluation_context(persona_id, product, now)
 
 
 async def get_context(persona_id: str) -> str:
-    """Return a text blob of everything remembered about this persona.
-
-    Args:
-        persona_id: id matching an entry in seed/personas.json, and the
-            Cognee dataset name it was seeded under.
-
-    Returns:
-        A natural-language summary of relevant persona context, synthesized
-        by Cognee's graph-completion search over that persona's dataset.
-    """
-    async with _client() as client:
-        results = await client.search(
-            query=(
-                "Summarize this person's health conditions, dietary needs, "
-                "food preferences, and any past reactions to specific foods."
-            ),
-            search_type=SearchType.GRAPH_COMPLETION,
-            datasets=[persona_id],
-        )
-    return "\n".join(r.text for r in results if r.text)
+    """Legacy generic context accessor retained for existing integrations."""
+    context = await get_evaluation_context(
+        persona_id,
+        {"name": "a food product", "ingredients": [], "nutrition": {}},
+        datetime.now().astimezone(),
+    )
+    return context.context_text

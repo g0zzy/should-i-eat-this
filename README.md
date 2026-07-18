@@ -37,8 +37,21 @@ package's `cbor2` dependency needs Rust to build from source; the SDK is a
 3. Fill in `COGNEE_API_URL` and `COGNEE_API_KEY` in `backend/.env`.
 4. Seed the two personas once: `python -c "import asyncio, memory; asyncio.run(memory.seed_personas())"`
 
-`backend/memory.py` gives each persona its own Cognee dataset and scopes
-`get_context(persona_id)` to that dataset via graph-completion search.
+Memory is isolated per persona in an opaque Cognee dataset. Profiles are
+structured and updated in place; food decisions are dated, append-only records.
+The retrieval API accepts a product and returns only product-relevant profile
+facts and prior reported outcomes. Seed the fictional POC history once with:
+
+```bash
+python -c "import asyncio, memory; asyncio.run(memory.seed_demo_memory())"
+```
+
+Do not run that command repeatedly against the same tenant: demo food events
+are append-only. The primary API is
+`memory.get_evaluation_context(persona_id, product, now)`. The older
+`get_context(persona_id)` accessor remains for compatibility while mock mode is
+active. Cognee is retrieval memory; a production application should also keep
+the original structured profile and event records in its own database.
 
 ## Frontend
 
@@ -63,8 +76,9 @@ Frontend runs at http://localhost:5173 (Vite's default).
 
 Once mock mode is confirmed working end to end:
 
-1. `backend/memory.py` — **done.** Real Cognee Cloud integration; just run the
-   seeding step above once you have API keys set.
+1. `backend/memory.py` — **done.** Real Cognee Cloud integration for a
+   structured profile and product-specific historical memory; run the seeding
+   step above once you have API keys set.
 2. `backend/evidence.py` — implement `get_evidence(ingredients)` using Tavily to
    pull live citations for each ingredient.
 3. `backend/synthesis.py` — implement `synthesize(product, context, evidence)`

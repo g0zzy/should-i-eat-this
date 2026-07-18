@@ -1,269 +1,307 @@
-"""Live web evidence lookup, backed by Tavily.
+"""Batched, cited health-evidence lookup for already-filtered ingredients.
 
-Tavily docs: https://docs.tavily.com
+This module does not resolve product labels and does not produce a verdict. It
+accepts notable ingredient names and returns only claims attributed to URLs in
+one authoritative-domain Tavily response.
 """
+from __future__ import annotations
+
+import json
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
+from urllib.parse import urlparse
 
+from anthropic import Anthropic
 from dotenv import load_dotenv
+from openai import OpenAI
+from tavily import TavilyClient
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-_CACHE: dict[str, dict] = {}
+_AUTHORITATIVE_DOMAINS = (
+    "efsa.europa.eu",
+    "fda.gov",
+    "who.int",
+    "ncbi.nlm.nih.gov",
+    "nih.gov",
+    "pubmed.ncbi.nlm.nih.gov",
+)
+_CACHE: dict[tuple[str, ...], list[dict]] = {}
 
-_PLAIN_INGREDIENTS = {
-    "water",
-    "whole grain oats",
-    "oats",
-    "canola oil",
-    "salt",
-    "cultured pasteurized whole milk",
-    "live active cultures",
-    "baking soda",
-}
-
-_NOTABLE_TERMS = {
-    "sugar",
-    "syrup",
-    "dextrose",
-    "honey",
-    "lecithin",
-    "color",
-    "yellow",
-    "blue",
-    "red",
-    "preservative",
-    "citrate",
-    "phosphate",
-    "acid",
-    "flavor",
-    "sodium",
-    "potassium",
-}
-
-_CONCERN_TERMS = {
-    "fda",
-    "efsa",
-    "regulator",
-    "regulatory",
-    "study",
-    "review",
-    "risk",
-    "safe",
-    "safety",
-    "acceptable daily intake",
-    "adi",
-    "diabetes",
-    "glucose",
-    "blood sugar",
-    "glycemic",
-    "cardiovascular",
-    "metabolic",
-    "additive",
-    "color additive",
-    "allergy",
-    "intolerance",
-    "inflammation",
-    "exposure",
-}
+_SYSTEM_PROMPT = """For each ingredient, write a 1-2 sentence neutral summary of
+what the evidence says and attach up to 3 claims, each with the source_url of
+the result it came from. Note EFSA/FDA disagreement when the provided sources
+show one. Use ONLY the provided results; never invent a URL or a source. Keep
+claims short and paraphrased, never long verbatim quotes. If there is no evidence
+for an ingredient, give an empty evidence list and a summary saying evidence was
+limited. Return ONLY valid JSON matching this schema, with no prose or markdown:
+[{"ingredient": "string", "summary": "string", "evidence":
+[{"claim": "string", "source_url": "exact URL from a provided result"}]}]"""
 
 
-def _is_notable(ingredient: str) -> bool:
-    normalized = ingredient.strip().lower()
-    if not normalized or normalized in _PLAIN_INGREDIENTS:
+def _clean_ingredients(ingredients: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for ingredient in ingredients:
+        value = re.sub(r"\s+", " ", str(ingredient)).strip()
+        key = value.casefold()
+        if value and key not in seen:
+            cleaned.append(value)
+            seen.add(key)
+    return cleaned
+
+
+def _cache_key(ingredients: list[str]) -> tuple[str, ...]:
+    return tuple(sorted(ingredient.casefold() for ingredient in ingredients))
+
+
+def _limited_entry(ingredient: str) -> dict:
+    return {
+        "ingredient": ingredient,
+        "summary": f"Evidence was limited for {ingredient} in the retrieved authoritative sources.",
+        "evidence": [],
+    }
+
+
+def _failure_entries(ingredients: list[str]) -> list[dict]:
+    return [
+        {
+            "ingredient": ingredient,
+            "summary": f"Could not retrieve evidence for {ingredient}.",
+            "evidence": [],
+        }
+        for ingredient in ingredients
+    ]
+
+
+def _authoritative_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return False
-    if normalized == "palm oil":
-        return True
-    return any(term in normalized for term in _NOTABLE_TERMS)
-
-
-def _ingredient_keywords(ingredient: str) -> list[str]:
-    words = re.findall(r"[a-z0-9]+", ingredient.lower())
-    return [word for word in words if len(word) > 2]
-
-
-def _chunk_ingredients(ingredients: list[str]) -> list[list[str]]:
-    if len(ingredients) <= 4:
-        return [ingredients]
-
-    midpoint = (len(ingredients) + 1) // 2
-    return [ingredients[:midpoint], ingredients[midpoint:]]
-
-
-def _build_query(batch: list[str]) -> str:
-    joined = ", ".join(batch)
-    return (
-        "current nutrition science and regulator evidence for these food "
-        f"ingredients: {joined}. Focus on health effects, FDA, EFSA, acceptable "
-        "daily intake, diabetes, metabolic effects, and food additive safety."
+    hostname = parsed.hostname.lower().rstrip(".")
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in _AUTHORITATIVE_DOMAINS
     )
 
 
-def _result_text(result: dict) -> str:
-    return " ".join(
-        str(result.get(key, "")) for key in ("title", "content", "raw_content") if result.get(key)
-    )
-
-
-def _matches_ingredient(ingredient: str, result: dict) -> bool:
-    text = _result_text(result).lower()
-    keywords = _ingredient_keywords(ingredient)
-    if not keywords:
-        return False
-
-    if ingredient.lower() in text:
-        return True
-
-    return any(keyword in text for keyword in keywords)
-
-
-def _split_sentences(text: str) -> list[str]:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    return [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", cleaned) if sentence.strip()]
-
-
-def _best_sentence(ingredient: str, result: dict) -> str:
-    keywords = _ingredient_keywords(ingredient)
-    sentences = _split_sentences(_result_text(result))
-
-    def score(sentence: str) -> int:
-        lower = sentence.lower()
-        ingredient_score = sum(3 for keyword in keywords if keyword in lower)
-        concern_score = sum(1 for term in _CONCERN_TERMS if term in lower)
-        return ingredient_score + concern_score
-
-    ranked = sorted(sentences, key=score, reverse=True)
-    return ranked[0] if ranked else _result_text(result)
-
-
-def _paraphrase_claim(ingredient: str, result: dict) -> str:
-    text = _best_sentence(ingredient, result).lower()
-    name = ingredient.strip()
-
-    if any(term in text for term in ("efsa", "acceptable daily intake", "adi")):
-        return f"European safety material discusses {name} using exposure limits or acceptable-intake framing."
-    if "fda" in text or "color additive" in text or "gras" in text:
-        return f"U.S. regulatory material discusses {name} as a permitted or reviewed food ingredient."
-    if any(term in text for term in ("diabetes", "glucose", "blood sugar", "glycemic")):
-        return f"Clinical or public-health material links {name} with blood-sugar or metabolic considerations."
-    if any(term in text for term in ("sugar", "sweetened", "added sugar", "syrup")):
-        return f"Nutrition guidance treats {name} as an added-sugar source to limit in routine diets."
-    if any(term in text for term in ("allergy", "allergic", "sensitivity", "intolerance")):
-        return f"Safety material notes possible sensitivity or intolerance concerns for {name} in some people."
-    if any(term in text for term in ("safe", "safety", "risk", "review")):
-        return f"Safety reviews discuss {name} in the context of food-additive exposure and risk."
-
-    return f"Source material discusses {name} in relation to food safety or nutrition."
-
-
-def _summary_for(ingredient: str, claims: list[str], answer: str | None) -> str:
-    name = ingredient.strip()
-    lower_name = name.lower()
-
-    if answer and lower_name in answer.lower():
-        compact = re.sub(r"\s+", " ", answer).strip()
-        sentences = _split_sentences(compact)
-        relevant = [s for s in sentences if lower_name in s.lower()]
-        if relevant:
-            return " ".join(relevant[:2])[:420]
-
-    if not claims:
-        return f"{name} is a notable ingredient, but the live search did not return a usable citation."
-
-    if len(claims) == 1:
-        return claims[0]
-
-    return f"Current sources discuss {name} from both nutrition and food-safety angles. The strongest live citations cover {claims[0][0].lower() + claims[0][1:]}"
-
-
-def _empty_entry(ingredient: str) -> dict:
-    return {"ingredient": ingredient, "summary": "", "evidence": []}
-
-
-async def get_evidence(ingredients: list[str]) -> list[dict]:
-    """Search the web for evidence about the given ingredients.
-
-    Args:
-        ingredients: list of ingredient name strings from a product.
-
-    Returns:
-        A list of ingredient evidence dicts. Plain ingredients are skipped.
-    """
-    notable = [ingredient for ingredient in ingredients if _is_notable(ingredient)]
-    if not notable:
+def _result_payload(response: object) -> list[dict[str, str]]:
+    if not isinstance(response, dict) or not isinstance(response.get("results"), list):
         return []
 
-    missing = []
-    for ingredient in notable:
-        cached = _CACHE.get(ingredient.lower())
-        if cached is None:
-            missing.append(ingredient)
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for item in response["results"]:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not isinstance(url, str) or url in seen_urls or not _authoritative_url(url):
+            continue
+        title = item.get("title") if isinstance(item.get("title"), str) else ""
+        content = item.get("content") if isinstance(item.get("content"), str) else ""
+        results.append(
+            {
+                "title": re.sub(r"\s+", " ", title).strip()[:300],
+                "url": url,
+                "content": re.sub(r"\s+", " ", content).strip()[:3500],
+            }
+        )
+        seen_urls.add(url)
+    return results
 
-    if not missing:
-        return [_CACHE[ingredient.lower()] for ingredient in notable]
 
-    api_key = os.getenv("TAVILY_API_KEY")
+def _llm_text(system_prompt: str, user_prompt: str) -> str:
+    api_key = os.getenv("LLM_API_KEY")
     if not api_key:
-        for ingredient in missing:
-            entry = _empty_entry(ingredient)
-            _CACHE[ingredient.lower()] = entry
-        return [_CACHE[ingredient.lower()] for ingredient in notable]
+        raise RuntimeError("LLM_API_KEY is not configured")
 
-    try:
-        from tavily import TavilyClient
+    provider = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
+    if provider == "anthropic":
+        response = Anthropic(api_key=api_key).messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=2400,
+            temperature=0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+        )
 
-        client = TavilyClient(api_key=api_key)
-    except Exception:
-        for ingredient in missing:
-            entry = _empty_entry(ingredient)
-            _CACHE[ingredient.lower()] = entry
-        return [_CACHE[ingredient.lower()] for ingredient in notable]
+    if provider == "openai":
+        response = OpenAI(api_key=api_key).chat.completions.create(
+            model="gpt-4.1-nano",
+            max_tokens=2400,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content or ""
 
-    for batch in _chunk_ingredients(missing):
-        try:
-            response = client.search(
-                query=_build_query(batch),
-                include_answer=True,
-                max_results=3,
-            )
-        except Exception:
-            for ingredient in batch:
-                entry = _empty_entry(ingredient)
-                _CACHE[ingredient.lower()] = entry
+    raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
+
+
+def _parse_json(text: str) -> list[dict]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+
+    start = stripped.find("[")
+    end = stripped.rfind("]")
+    if start < 0 or end < start:
+        raise ValueError("LLM response did not contain a JSON array")
+
+    payload = json.loads(stripped[start:end + 1])
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise ValueError("LLM response did not match the evidence array schema")
+    return payload
+
+
+def _compact_text(value: object, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    compact = re.sub(r"\s+", " ", value).strip()
+    if len(compact) <= limit:
+        return compact
+    shortened = compact[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return f"{shortened}…" if shortened else ""
+
+
+def _validated_entries(
+    ingredients: list[str],
+    payload: list[dict],
+    allowed_urls: set[str],
+) -> list[dict]:
+    requested = {ingredient.casefold(): ingredient for ingredient in ingredients}
+    returned: dict[str, dict] = {}
+    for item in payload:
+        ingredient = item.get("ingredient")
+        if not isinstance(ingredient, str):
+            continue
+        key = ingredient.strip().casefold()
+        if key in requested and key not in returned:
+            returned[key] = item
+
+    if ingredients and not returned:
+        raise ValueError("LLM response did not contain any requested ingredients")
+
+    validated: list[dict] = []
+    for ingredient in ingredients:
+        item = returned.get(ingredient.casefold())
+        if item is None:
+            validated.append(_limited_entry(ingredient))
             continue
 
-        answer = response.get("answer") if isinstance(response, dict) else None
-        results = response.get("results", []) if isinstance(response, dict) else []
-
-        for ingredient in batch:
-            evidence = []
-            seen_urls = set()
-
-            for result in results:
-                source_url = result.get("url")
-                if not source_url or source_url in seen_urls:
+        raw_evidence = item.get("evidence")
+        evidence: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        if isinstance(raw_evidence, list):
+            for claim_item in raw_evidence:
+                if not isinstance(claim_item, dict):
                     continue
-                if not _matches_ingredient(ingredient, result):
+                url = claim_item.get("source_url")
+                claim = _compact_text(claim_item.get("claim"), 280)
+                if not isinstance(url, str) or url not in allowed_urls or not claim:
                     continue
-
-                evidence.append(
-                    {
-                        "claim": _paraphrase_claim(ingredient, result),
-                        "source_url": source_url,
-                    }
-                )
-                seen_urls.add(source_url)
-
+                identity = (claim.casefold(), url)
+                if identity in seen:
+                    continue
+                evidence.append({"claim": claim, "source_url": url})
+                seen.add(identity)
                 if len(evidence) == 3:
                     break
 
-            claims = [item["claim"] for item in evidence]
-            entry = {
+        if not evidence:
+            validated.append(_limited_entry(ingredient))
+            continue
+
+        summary = _compact_text(item.get("summary"), 520)
+        if not summary:
+            summary = f"The retrieved authoritative sources contain evidence relevant to {ingredient}."
+        validated.append(
+            {
                 "ingredient": ingredient,
-                "summary": _summary_for(ingredient, claims, answer),
+                "summary": summary,
                 "evidence": evidence,
             }
-            _CACHE[ingredient.lower()] = entry
+        )
+    return validated
 
-    return [_CACHE[ingredient.lower()] for ingredient in notable]
+
+def _attribution_prompt(ingredients: list[str], answer: str, results: list[dict]) -> str:
+    return json.dumps(
+        {
+            "ingredients": ingredients,
+            "tavily_answer": answer[:6000],
+            "results": results,
+        },
+        ensure_ascii=False,
+    )
+
+
+def get_evidence(ingredients: list[str]) -> list[dict]:
+    """Return per-ingredient health evidence from one batched Tavily search."""
+    normalized = _clean_ingredients(ingredients)
+    if not normalized:
+        return []
+
+    key = _cache_key(normalized)
+    if key in _CACHE:
+        return deepcopy(_CACHE[key])
+
+    fallback = _failure_entries(normalized)
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        _CACHE[key] = fallback
+        return deepcopy(fallback)
+
+    try:
+        client = TavilyClient(api_key=api_key)
+        response = client.search(
+            query=f"health effects and safety evidence: {', '.join(normalized)}",
+            search_depth="advanced",
+            topic="general",
+            max_results=6,
+            include_answer="advanced",
+            include_domains=list(_AUTHORITATIVE_DOMAINS),
+        )
+    except Exception:
+        _CACHE[key] = fallback
+        return deepcopy(fallback)
+
+    results = _result_payload(response)
+    allowed_urls = {result["url"] for result in results}
+    answer = response.get("answer") if isinstance(response, dict) else ""
+    answer = answer if isinstance(answer, str) else ""
+    prompt = _attribution_prompt(normalized, answer, results)
+
+    try:
+        llm_output = _llm_text(_SYSTEM_PROMPT, prompt)
+    except Exception:
+        _CACHE[key] = fallback
+        return deepcopy(fallback)
+
+    try:
+        payload = _parse_json(llm_output)
+        evidence = _validated_entries(normalized, payload, allowed_urls)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        retry_prompt = (
+            f"The previous output was invalid. Return only the required JSON array.\n"
+            f"Original data:\n{prompt}\nInvalid output:\n{llm_output[:4000]}"
+        )
+        try:
+            retry_output = _llm_text(_SYSTEM_PROMPT, retry_prompt)
+            payload = _parse_json(retry_output)
+            evidence = _validated_entries(normalized, payload, allowed_urls)
+        except Exception:
+            evidence = fallback
+
+    _CACHE[key] = evidence
+    return deepcopy(evidence)

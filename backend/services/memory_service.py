@@ -18,7 +18,7 @@ from typing import Any, Callable, Literal
 from cognee_sdk import CogneeClient
 from cognee_sdk.models import SearchType
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 load_dotenv()
 
@@ -160,7 +160,17 @@ class CogneeMemoryService:
             raise MemoryConfigurationError(
                 "Cognee memory requires COGNEE_API_URL and COGNEE_API_KEY in backend/.env"
             )
-        return CogneeClient(api_url=self.api_url, api_token=self.api_key)
+        # Cognee Cloud API keys use X-Api-Key. The lightweight cognee-sdk
+        # defaults to a Bearer Authorization header, but exposes this hook for
+        # Cloud-compatible authentication without replacing the SDK.
+        def cloud_api_key_auth(_method: str, _url: str, headers: dict[str, str]) -> None:
+            headers.pop("Authorization", None)
+            headers["X-Api-Key"] = self.api_key
+
+        return CogneeClient(
+            api_url=self.api_url,
+            request_interceptor=cloud_api_key_auth,
+        )
 
     async def _dataset(self, client: CogneeClient, persona_id: str) -> Any:
         name = dataset_name_for(persona_id)
@@ -183,6 +193,23 @@ class CogneeMemoryService:
                 continue
         return records
 
+    @staticmethod
+    async def _update_profile_record(client: CogneeClient, data_id: Any, dataset_id: Any, document: str) -> None:
+        """Update a profile while tolerating a cognee-sdk 0.3.0 response bug.
+
+        Cognee Cloud returns a successful PATCH response keyed by pipeline run,
+        whereas this SDK version attempts to parse it as ``UpdateResult`` with
+        required ``status`` and ``message`` fields. The request has already
+        succeeded when that Pydantic ValidationError is raised.
+        """
+        try:
+            await client.update(data_id, dataset_id, document)
+        except ValidationError as exc:
+            errors = exc.errors()
+            missing = {error.get("loc", (None,))[0] for error in errors if error.get("type") == "missing"}
+            if missing != {"status", "message"}:
+                raise
+
     async def upsert_profile(self, profile: PersonProfile) -> None:
         document = _profile_document(profile)
         try:
@@ -190,7 +217,7 @@ class CogneeMemoryService:
                 dataset = await self._dataset(client, profile.persona_id)
                 records = await self._profile_records(client, dataset)
                 if records:
-                    await client.update(records[0][0].id, dataset.id, document)
+                    await self._update_profile_record(client, records[0][0].id, dataset.id, document)
                     for duplicate, _ in records[1:]:
                         await client.delete(duplicate.id, dataset.id)
                 else:
@@ -257,6 +284,26 @@ class CogneeMemoryService:
         )
 
     @staticmethod
+    def _texts_from_search_result(result: Any) -> list[str]:
+        """Normalize both documented and current Cloud SDK result shapes.
+
+        cognee-sdk 0.3.0 returns Cloud chunk payloads in ``search_result``
+        while leaving the top-level ``SearchResult.text`` empty.
+        """
+        if isinstance(result, dict):
+            direct_text = result.get("text")
+            nested = result.get("search_result") or []
+        else:
+            direct_text = getattr(result, "text", None)
+            nested = getattr(result, "search_result", None) or []
+        texts = [direct_text] if isinstance(direct_text, str) and direct_text else []
+        for item in nested:
+            text = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+            if isinstance(text, str) and text:
+                texts.append(text)
+        return texts
+
+    @staticmethod
     def _context_text(profile: PersonProfile | None, memories: list[RelevantMemory]) -> str:
         parts: list[str] = []
         if profile:
@@ -316,13 +363,13 @@ class CogneeMemoryService:
         memories = []
         seen: set[str] = set()
         for result in results:
-            text = getattr(result, "text", None) or (result.get("text") if isinstance(result, dict) else None)
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            memory = self._memory_from_result(text)
-            if memory:
-                memories.append(memory)
+            for text in self._texts_from_search_result(result):
+                if text in seen:
+                    continue
+                seen.add(text)
+                memory = self._memory_from_result(text)
+                if memory:
+                    memories.append(memory)
         status: Literal["ok", "empty"] = "ok" if memories else "empty"
         return EvaluationContext(
             profile=profile,

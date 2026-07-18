@@ -107,7 +107,11 @@ class MemoryServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.record_food_decision(event)
         dataset = self.client.datasets[dataset_name_for("maria")]
         event_raw = [raw for raw in self.client.documents[dataset.id].values() if "maria-bar" in raw][0]
-        self.client.search_results = [SimpleNamespace(text=event_raw)]
+        # Cloud SDK 0.3.0 nests the chunk text under search_result rather than
+        # populating top-level SearchResult.text.
+        self.client.search_results = [
+            SimpleNamespace(text=None, search_result=[{"text": event_raw}])
+        ]
 
         context = await self.service.get_evaluation_context(
             "maria", {"name": "Granola bar", "ingredients": ["sugar"], "nutrition": {"added_sugar_g": 11}}, datetime.now().astimezone()

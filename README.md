@@ -4,10 +4,11 @@ A personalized verdict on whether a specific food product is right for a specifi
 person — grounded in live web evidence and a persistent memory of that person.
 
 **Current state: mock mode.** `/evaluate` returns hardcoded responses so the full
-stack runs end to end. The real Cognee (memory) / Tavily (evidence) / LLM
-(synthesis) integrations are stubbed out in `backend/memory.py`,
-`backend/evidence.py`, and `backend/synthesis.py` with the correct function
-signatures — see the `TODO(real-integration)` comments in each file.
+stack runs end to end. The real Tavily (evidence) / LLM (synthesis) integrations
+are stubbed out in `backend/evidence.py` and `backend/synthesis.py` with the
+correct function signatures — see the `TODO(real-integration)` comments in
+each file. `backend/memory.py` is a **real, working integration** against
+Cognee Cloud (see below) — it just isn't wired into `/evaluate` yet.
 
 ## Backend
 
@@ -16,18 +17,28 @@ cd backend
 python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in LLM_API_KEY / TAVILY_API_KEY when wiring up real integrations
+cp .env.example .env   # fill in API keys — see "Memory (Cognee Cloud)" below
 uvicorn main:app --reload --port 8000
 ```
 
-> **Note:** `cognee` transitively depends on `cbor2`, which needs a Rust
-> toolchain to build from source if no prebuilt wheel matches your platform.
-> Mock mode does not import `cognee` at runtime, so if `pip install` fails on
-> `cbor2`, you can install everything else first and add `cognee` back once
-> you have Rust (`rustup.rs`) or a matching wheel available:
-> `pip install fastapi "uvicorn[standard]" pydantic python-dotenv tavily-python anthropic openai`
-
 Backend runs at http://localhost:8000. Check http://localhost:8000/health.
+
+### Memory (Cognee Cloud)
+
+Memory uses **Cognee Cloud** (https://platform.cognee.ai) via the lightweight
+`cognee-sdk` client, not the full self-hosted `cognee` package — this avoids
+a local vector/graph DB setup and a Rust toolchain requirement (the full
+package's `cbor2` dependency needs Rust to build from source; the SDK is a
+~5-10MB httpx-based REST client and needs neither).
+
+1. Sign in at https://platform.cognee.ai (Google/GitHub OAuth) — a free
+   workspace is created automatically.
+2. Create an API key on the API Keys page and copy your tenant URL.
+3. Fill in `COGNEE_API_URL` and `COGNEE_API_KEY` in `backend/.env`.
+4. Seed the two personas once: `python -c "import asyncio, memory; asyncio.run(memory.seed_personas())"`
+
+`backend/memory.py` gives each persona its own Cognee dataset and scopes
+`get_context(persona_id)` to that dataset via graph-completion search.
 
 ## Frontend
 
@@ -52,8 +63,8 @@ Frontend runs at http://localhost:5173 (Vite's default).
 
 Once mock mode is confirmed working end to end:
 
-1. `backend/memory.py` — implement `seed_personas()` and `get_context(persona_id)`
-   using Cognee to persist and recall persona profiles from `backend/seed/personas.json`.
+1. `backend/memory.py` — **done.** Real Cognee Cloud integration; just run the
+   seeding step above once you have API keys set.
 2. `backend/evidence.py` — implement `get_evidence(ingredients)` using Tavily to
    pull live citations for each ingredient.
 3. `backend/synthesis.py` — implement `synthesize(product, context, evidence)`

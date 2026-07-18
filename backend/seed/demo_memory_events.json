@@ -1,0 +1,62 @@
+[
+  {
+    "event_id": "maria-sugary-snack-2026-07-14",
+    "persona_id": "diabetic",
+    "occurred_at": "2026-07-14T15:30:00+02:00",
+    "product": {"name": "Chocolate caramel snack bar", "ingredients": ["sugar", "glucose syrup", "milk chocolate"], "nutrition": {"added_sugar_g": 22, "fiber_g": 1, "protein_g": 2}},
+    "recommendation": "avoid",
+    "ate_it": true,
+    "outcome": "energy_crash",
+    "notes": "Reported feeling hungry and low-energy within an hour."
+  },
+  {
+    "event_id": "maria-yogurt-2026-07-16",
+    "persona_id": "diabetic",
+    "occurred_at": "2026-07-16T10:00:00+02:00",
+    "product": {"name": "Plain Greek yogurt", "ingredients": ["cultured milk", "live cultures"], "nutrition": {"added_sugar_g": 0, "fiber_g": 0, "protein_g": 19}},
+    "recommendation": "eat",
+    "ate_it": true,
+    "outcome": "fine",
+    "notes": "Reported it was filling and felt steady afterward."
+  },
+  {
+    "event_id": "maria-almonds-2026-07-17",
+    "persona_id": "diabetic",
+    "occurred_at": "2026-07-17T16:00:00+02:00",
+    "product": {"name": "Unsalted almonds", "ingredients": ["almonds"], "nutrition": {"added_sugar_g": 0, "fiber_g": 3.5, "protein_g": 6}},
+    "recommendation": "eat",
+    "ate_it": true,
+    "outcome": "fine",
+    "notes": "Used as an afternoon snack without a later energy crash."
+  },
+  {
+    "event_id": "jordan-sports-drink-2026-07-13",
+    "persona_id": "athlete",
+    "occurred_at": "2026-07-13T09:15:00+02:00",
+    "product": {"name": "Lemon-lime sports drink", "ingredients": ["water", "sugar", "sodium citrate"], "nutrition": {"added_sugar_g": 21, "sodium_mg": 160}},
+    "recommendation": "eat",
+    "ate_it": true,
+    "outcome": "fine",
+    "notes": "Used during a 16 km long run and reported it worked well."
+  },
+  {
+    "event_id": "jordan-trail-mix-2026-07-15",
+    "persona_id": "athlete",
+    "occurred_at": "2026-07-15T07:00:00+02:00",
+    "product": {"name": "Nut and dried-fruit trail mix", "ingredients": ["cashews", "raisins", "oats"], "nutrition": {"added_sugar_g": 12, "fiber_g": 6, "protein_g": 7}},
+    "recommendation": "moderate",
+    "ate_it": true,
+    "outcome": "symptoms",
+    "notes": "Ate it shortly before a run and reported GI discomfort."
+  },
+  {
+    "event_id": "jordan-banana-2026-07-17",
+    "persona_id": "athlete",
+    "occurred_at": "2026-07-17T06:30:00+02:00",
+    "product": {"name": "Banana", "ingredients": ["banana"], "nutrition": {"fiber_g": 3, "protein_g": 1}},
+    "recommendation": "eat",
+    "ate_it": true,
+    "outcome": "fine",
+    "notes": "Used before an easy morning run and reported no GI discomfort."
+  }
+]

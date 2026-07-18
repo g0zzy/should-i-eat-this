@@ -8,11 +8,19 @@ of `evaluate()` for the real pipeline (memory.get_context -> evidence.get_eviden
 """
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from schema import EvaluateRequest, EvaluateResponse
+from services.evidence_service import EvidenceSearchError, find_relevant_evidence
+from services.product_resolver import (
+    ProductResolutionError,
+    TavilyConfigurationError as ProductResolverConfigurationError,
+    resolve_product,
+)
 
 SEED_DIR = Path(__file__).parent / "seed"
 
@@ -34,6 +42,54 @@ def _load_seed(filename: str) -> list[dict]:
 
 PRODUCTS = {p["id"]: p for p in _load_seed("products.json")}
 PERSONAS = {p["id"]: p for p in _load_seed("personas.json")}
+
+
+class ResolveAndEvidenceRequest(BaseModel):
+    product_name: str
+    profile: dict[str, Any] | None = None
+    persona_id: str | None = None
+    include_debug: bool = False
+
+
+def _profile_from_persona(persona_id: str) -> dict[str, list[str]]:
+    if persona_id not in PERSONAS:
+        raise HTTPException(status_code=404, detail=f"Unknown persona_id: {persona_id}")
+
+    profile = PERSONAS[persona_id]["profile"].lower()
+    if persona_id == "diabetic" or "diabetes" in profile:
+        return {
+            "health_conditions": ["type_2_diabetes"],
+            "allergies_or_intolerances": [],
+            "dietary_goals": ["limit_added_sugar", "increase_fiber"],
+            "personal_rules": ["Avoid snacks with more than 15g added sugar"],
+        }
+    if persona_id == "athlete" or "runner" in profile or "endurance" in profile:
+        return {
+            "health_conditions": [],
+            "allergies_or_intolerances": [],
+            "dietary_goals": ["quick_carbs_near_training"],
+            "personal_rules": ["Avoid high-fat or high-fiber foods within 2 hours of a run"],
+        }
+
+    return {
+        "health_conditions": [],
+        "allergies_or_intolerances": [],
+        "dietary_goals": [],
+        "personal_rules": [],
+    }
+
+
+def _request_profile(request: ResolveAndEvidenceRequest) -> dict[str, Any]:
+    if request.profile is not None:
+        return request.profile
+    if request.persona_id is not None:
+        return _profile_from_persona(request.persona_id)
+    return {
+        "health_conditions": [],
+        "allergies_or_intolerances": [],
+        "dietary_goals": [],
+        "personal_rules": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +255,43 @@ MOCK_RESPONSES: dict[tuple[str, str], dict] = {
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/resolve-and-evidence")
+async def resolve_and_evidence(request: ResolveAndEvidenceRequest) -> dict:
+    """Resolve a product name with Tavily, then fetch profile-relevant evidence.
+
+    This is the product-name-first Tavily endpoint. It intentionally does not
+    replace `/evaluate`, which still returns the hackathon mock response.
+    """
+    try:
+        resolution = await resolve_product(
+            request.product_name,
+            include_debug=request.include_debug,
+        )
+    except ProductResolverConfigurationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except ProductResolutionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if resolution["status"] != "resolved":
+        return {"product_resolution": resolution, "evidence": []}
+
+    profile = _request_profile(request)
+    try:
+        evidence = await find_relevant_evidence(
+            resolution["product"],
+            profile,
+            include_debug=request.include_debug,
+        )
+    except EvidenceSearchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "product_resolution": resolution,
+        "profile": profile,
+        "evidence": evidence,
+    }
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)

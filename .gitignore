@@ -5,6 +5,8 @@ backend/**/__pycache__/
 *.pyc
 backend/.env
 
+.idea
+
 # Node
 frontend/node_modules/
 frontend/dist/

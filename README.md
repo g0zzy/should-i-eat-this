@@ -23,6 +23,7 @@ uvicorn main:app --reload --port 8000
 
 Backend runs at http://localhost:8000. Check http://localhost:8000/health.
 
+<<<<<<< Updated upstream
 ### Memory (Cognee Cloud)
 
 Memory uses **Cognee Cloud** (https://platform.cognee.ai) via the lightweight
@@ -52,6 +53,22 @@ are append-only. The primary API is
 `get_context(persona_id)` accessor remains for compatibility while mock mode is
 active. Cognee is retrieval memory; a production application should also keep
 the original structured profile and event records in its own database.
+=======
+### Tavily product and evidence endpoint
+
+The product-name-first Tavily flow is exposed separately from the mocked
+`/evaluate` route:
+
+```bash
+curl -X POST http://localhost:8000/resolve-and-evidence \
+  -H "Content-Type: application/json" \
+  -d '{"product_name":"Snickers","persona_id":"diabetic","include_debug":true}'
+```
+
+`backend/services/product_resolver.py` resolves the product label from Tavily;
+`backend/services/evidence_service.py` then searches profile-relevant
+clinical/public-health evidence. `TAVILY_API_KEY` is read from `backend/.env`.
+>>>>>>> Stashed changes
 
 ## Frontend
 

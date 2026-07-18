@@ -66,5 +66,9 @@
       "sodium_mg": 95,
       "total_fat_g": 9
     }
+  },
+  {
+    "id": "snickers",
+    "name": "Snickers Chocolate Bar"
   }
 ]

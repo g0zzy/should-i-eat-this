@@ -1,49 +1,69 @@
-"""Persistent persona memory, backed by Cognee.
+"""Persistent persona memory, backed by Cognee Cloud.
 
-TODO(real-integration): replace the stub bodies below with real Cognee calls.
-Cognee docs: https://docs.cognee.ai
+Uses the lightweight `cognee-sdk` client (a thin httpx wrapper over the
+Cognee Cloud REST API) rather than the full `cognee` package — that avoids
+pulling in cognee's local vector/graph DB stack and its Rust-built
+`cbor2` dependency, which isn't needed when Cognee is doing the hosting.
 
-Expected real flow:
-  1. seed_personas() loads seed/personas.json and cognifies each persona's
-     text profile into Cognee's knowledge graph / vector store, tagged by
-     persona id, once at startup (or via a one-off setup script).
-  2. get_context(persona_id) runs a Cognee `search`/`cognify` query scoped
-     to that persona id and returns a short synthesized text blob describing
-     everything relevant we "remember" about them (conditions, past
-     reactions, preferences) for the synthesis step to use as grounding.
+Each persona gets its own Cognee dataset (dataset_name == persona_id), so
+get_context() can scope its search to just that person's data.
 """
 import json
+import os
 from pathlib import Path
+
+from cognee_sdk import CogneeClient
+from cognee_sdk.models import SearchType
+from dotenv import load_dotenv
+
+load_dotenv()
 
 SEED_DIR = Path(__file__).parent / "seed"
 
+COGNEE_API_URL = os.environ["COGNEE_API_URL"]
+COGNEE_API_KEY = os.environ["COGNEE_API_KEY"]
+
+
+def load_persona_profiles() -> list[dict]:
+    """Read the raw seed file (used by seed_personas() and by mock mode)."""
+    with open(SEED_DIR / "personas.json") as f:
+        return json.load(f)
+
+
+def _client() -> CogneeClient:
+    return CogneeClient(api_url=COGNEE_API_URL, api_token=COGNEE_API_KEY)
+
 
 async def seed_personas() -> None:
-    """Load persona profiles into Cognee's memory store.
-
-    TODO(real-integration): call `cognee.add(...)` + `cognee.cognify()` for
-    each persona in seed/personas.json so their profile text becomes queryable
-    knowledge. For now this is a no-op stub — mock mode does not need it.
+    """Load each persona's profile text into its own Cognee dataset and
+    run cognify so it becomes queryable knowledge. Run this once at startup
+    (or via a one-off setup script) before calling get_context().
     """
-    raise NotImplementedError("seed_personas() is a stub — wire up Cognee here")
+    personas = load_persona_profiles()
+    async with _client() as client:
+        for persona in personas:
+            await client.add(data=persona["profile"], dataset_name=persona["id"])
+        await client.cognify(datasets=[p["id"] for p in personas])
 
 
 async def get_context(persona_id: str) -> str:
     """Return a text blob of everything remembered about this persona.
 
-    TODO(real-integration): call `cognee.search(query=..., persona_id=...)`
-    (or equivalent) and condense the results into a short paragraph.
-
     Args:
-        persona_id: id matching an entry in seed/personas.json
+        persona_id: id matching an entry in seed/personas.json, and the
+            Cognee dataset name it was seeded under.
 
     Returns:
-        A natural-language summary of relevant persona context.
+        A natural-language summary of relevant persona context, synthesized
+        by Cognee's graph-completion search over that persona's dataset.
     """
-    raise NotImplementedError("get_context() is a stub — wire up Cognee here")
-
-
-def load_persona_profiles() -> list[dict]:
-    """Helper: read the raw seed file (used by mock mode and by seeding)."""
-    with open(SEED_DIR / "personas.json") as f:
-        return json.load(f)
+    async with _client() as client:
+        results = await client.search(
+            query=(
+                "Summarize this person's health conditions, dietary needs, "
+                "food preferences, and any past reactions to specific foods."
+            ),
+            search_type=SearchType.GRAPH_COMPLETION,
+            datasets=[persona_id],
+        )
+    return "\n".join(r.text for r in results if r.text)

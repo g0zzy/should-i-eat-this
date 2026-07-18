@@ -6,6 +6,7 @@ render before the Cognee/Tavily/LLM integrations are wired up. Swap the body
 of `evaluate()` for the real pipeline (memory.get_context -> evidence.get_evidence
 -> synthesis.synthesize) once those stubs are implemented.
 """
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from ingredients import filter_notable, resolve_ingredients
 from schema import EvaluateRequest, EvaluateResponse
 from services.evidence_service import EvidenceSearchError, find_relevant_evidence
 from services.product_resolver import (
@@ -49,6 +51,10 @@ class ResolveAndEvidenceRequest(BaseModel):
     profile: dict[str, Any] | None = None
     persona_id: str | None = None
     include_debug: bool = False
+
+
+class ResolveIngredientsRequest(BaseModel):
+    product_name: str
 
 
 def _profile_from_persona(persona_id: str) -> dict[str, list[str]]:
@@ -255,6 +261,18 @@ MOCK_RESPONSES: dict[tuple[str, str], dict] = {
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/resolve-ingredients")
+async def resolve_ingredient_preview(request: ResolveIngredientsRequest) -> dict:
+    """Resolve and filter a label without fetching evidence or synthesizing a verdict."""
+    product_name = request.product_name.strip()
+    if not product_name:
+        raise HTTPException(status_code=400, detail="product_name must not be empty")
+
+    resolution = await asyncio.to_thread(resolve_ingredients, product_name)
+    notable = await asyncio.to_thread(filter_notable, resolution["ingredients"])
+    return {**resolution, "notable_ingredients": notable}
 
 
 @app.post("/resolve-and-evidence")
